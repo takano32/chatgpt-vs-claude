@@ -70,7 +70,7 @@ def _fill_and_submit(session: Session, text: str) -> None:
         raise
     composer.click()
     composer.fill(text)
-    page.wait_for_timeout(500)
+    page.wait_for_timeout(300)
     send_button = page.locator(SEND_BUTTON_SELECTOR)
     try:
         send_button.click(timeout=5000)
@@ -105,19 +105,18 @@ def wait_for_composer_idle(session: Session,
 
     The conversation API can report a reply finished while the UI is still
     painting it; during that window the send button is a stop button and a
-    submit would cut the reply short. Best-effort: after the timeout the
-    caller proceeds anyway and the submit fallbacks take over.
+    submit would cut the reply short. The wait is event-driven — it returns
+    the moment the stop button goes away — and best-effort: after the
+    timeout the caller proceeds anyway and the submit fallbacks take over.
     """
     page = session.page
-    deadline = time.monotonic() + timeout_seconds
-    while time.monotonic() < deadline:
-        try:
-            stop = page.locator(STOP_BUTTON_SELECTOR)
-            if stop.count() == 0 or not stop.first.is_visible():
-                return
-        except PlaywrightError:
-            return
-        time.sleep(1.0)
+    try:
+        stop = page.locator(STOP_BUTTON_SELECTOR)
+        if stop.count() and stop.first.is_visible():
+            stop.first.wait_for(state="hidden",
+                                timeout=timeout_seconds * 1000)
+    except PlaywrightError:
+        pass
 
 
 def _normalized(text: str) -> str:
@@ -148,7 +147,7 @@ def send_followup(session: Session, conversation_id: str, text: str) -> None:
         page.wait_for_timeout(2000)
     wait_for_composer_idle(session)
     _fill_and_submit(session, text)
-    page.wait_for_timeout(1500)
+    page.wait_for_timeout(700)
     try:
         composer = page.locator(COMPOSER_SELECTOR)
         leftover = _normalized(composer.inner_text(timeout=5000))
@@ -246,6 +245,32 @@ def latest_assistant_text(
     return text, finished, best_time
 
 
+def _pause_before_next_poll(session: Session, poll_seconds: float) -> None:
+    """Sleep between polls, but wake the instant the UI stops streaming.
+
+    While the reply is streaming, the composer shows a stop button; waiting
+    for it to disappear turns "up to poll_seconds late" into "immediately
+    after generation ends". When it is not visible (the stream has not
+    started, or the testid changed), fall back to a short sleep so the API
+    polling still makes progress at a gentle cadence. The probe is fully
+    defensive: it must never break the wait it is only accelerating.
+    """
+    try:
+        stop = session.page.locator(STOP_BUTTON_SELECTOR)
+        if stop.count() and stop.first.is_visible():
+            try:
+                stop.first.wait_for(
+                    state="hidden",
+                    timeout=max(poll_seconds, 1.0) * 1000,
+                )
+            except PlaywrightError:
+                pass  # still streaming after a full interval; poll for progress
+            return
+    except Exception:
+        pass
+    time.sleep(min(poll_seconds, 0.75))
+
+
 def wait_for_reply(
     session: Session,
     conversation_id: str,
@@ -276,7 +301,7 @@ def wait_for_reply(
             if report and text and len(text) != len(last_text):
                 report(f"  ... {len(text)} chars so far")
                 last_text = text
-        time.sleep(poll_seconds)
+        _pause_before_next_poll(session, poll_seconds)
     raise RuntimeError(
         f"No finished reply within {timeout_seconds}s "
         f"(conversation {conversation_id}). The chat stays in the browser; "
