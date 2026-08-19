@@ -139,25 +139,23 @@ class ClaudeSpeaker:
                  timeout_seconds: int = 600,
                  cwd: Path | None = None,
                  system_prompt: str | None = CLAUDE_SYSTEM_PROMPT):
-        self.model = model
-        self.command = command
-        self.timeout_seconds = timeout_seconds
-        self.cwd = cwd
-        self.system_prompt = system_prompt
-        self.session_id: str | None = None
+        self._process = claude_cli.ClaudeProcess(
+            model=model,
+            command=command,
+            cwd=cwd,
+            system_prompt=system_prompt,
+            timeout_seconds=timeout_seconds,
+        )
 
     def say(self, prompt: str) -> str:
-        reply, session_id = claude_cli.ask(
-            prompt,
-            session_id=self.session_id,
-            model=self.model,
-            command=self.command,
-            timeout_seconds=self.timeout_seconds,
-            cwd=self.cwd,
-            system_prompt=self.system_prompt,
-        )
-        self.session_id = session_id
-        return reply
+        return self._process.ask(prompt)
+
+    @property
+    def session_id(self) -> str | None:
+        return self._process.session_id
+
+    def close(self) -> None:
+        self._process.close()
 
 
 def run_debate(

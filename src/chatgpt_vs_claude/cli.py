@@ -394,6 +394,7 @@ def cmd_discuss(args: argparse.Namespace, profile_dir: Path,
             # ChatGPT but before its statement completed; the conversation
             # exists then, and the transcript must still point at it.
             record_links()
+            claude_speaker.close()
 
     print()
     print(f"Done: {args.turns} statements each.")
