@@ -245,15 +245,18 @@ def latest_assistant_text(
     return text, finished, best_time
 
 
-def _pause_before_next_poll(session: Session, poll_seconds: float) -> None:
+def _pause_before_next_poll(session: Session, poll_seconds: float) -> bool:
     """Sleep between polls, but wake the instant the UI stops streaming.
 
     While the reply is streaming, the composer shows a stop button; waiting
     for it to disappear turns "up to poll_seconds late" into "immediately
-    after generation ends". When it is not visible (the stream has not
-    started, or the testid changed), fall back to a short sleep so the API
-    polling still makes progress at a gentle cadence. The probe is fully
-    defensive: it must never break the wait it is only accelerating.
+    after generation ends". Returns True at that moment so the caller can
+    poll flat-out: the API's finished flag can lag the UI by a few seconds,
+    and dawdling through that window is exactly the wait the user sees.
+    When the button is not visible (the stream has not started, or the
+    testid changed), fall back to a short sleep so the API polling still
+    makes progress at a brisk cadence. The probe is fully defensive: it
+    must never break the wait it is only accelerating.
     """
     try:
         stop = session.page.locator(STOP_BUTTON_SELECTOR)
@@ -263,12 +266,13 @@ def _pause_before_next_poll(session: Session, poll_seconds: float) -> None:
                     state="hidden",
                     timeout=max(poll_seconds, 1.0) * 1000,
                 )
+                return True
             except PlaywrightError:
-                pass  # still streaming after a full interval; poll for progress
-            return
+                return False  # still streaming; poll for progress
     except Exception:
         pass
-    time.sleep(min(poll_seconds, 0.75))
+    time.sleep(min(poll_seconds, 0.3))
+    return False
 
 
 def wait_for_reply(
@@ -287,6 +291,9 @@ def wait_for_reply(
     deadline = time.monotonic() + timeout_seconds
     path = CONVERSATION_PATH.format(conversation_id=conversation_id)
     last_text = ""
+    # After the UI stream ends, the API's finished flag is at most moments
+    # away; poll flat-out through that window instead of pacing politely.
+    fast_until = 0.0
     while time.monotonic() < deadline:
         result = api.request(session, "GET", path, tolerate=(404,))
         if result.get("status") == 200 and result.get("body"):
@@ -301,7 +308,10 @@ def wait_for_reply(
             if report and text and len(text) != len(last_text):
                 report(f"  ... {len(text)} chars so far")
                 last_text = text
-        _pause_before_next_poll(session, poll_seconds)
+        if time.monotonic() < fast_until:
+            time.sleep(0.2)
+        elif _pause_before_next_poll(session, poll_seconds):
+            fast_until = time.monotonic() + 8.0
     raise RuntimeError(
         f"No finished reply within {timeout_seconds}s "
         f"(conversation {conversation_id}). The chat stays in the browser; "
